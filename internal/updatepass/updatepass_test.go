@@ -373,12 +373,11 @@ func TestRunCleanupFailureIsLoggedButNonFatal(t *testing.T) {
 		"one.yml": {Services: []composefile.Service{{ComposePath: "one.yml", Name: "web", Image: "example/web:latest"}}},
 	}}
 	commander := &fakeCommander{
-		imageIDs:      map[string][]string{"one.yml/web": {"sha256:old", "sha256:new"}},
-		cleanupErrs:   map[string]error{"one.yml:sha256:old": errors.New("image is in use")},
-		pullErrs:      map[string]error{},
-		recreateErrs:  map[string]error{},
-		imageErrs:     map[string]error{},
-		removedImages: []string{},
+		imageIDs:     map[string][]string{"one.yml/web": {"sha256:old", "sha256:new"}},
+		cleanupErrs:  map[string]error{"one.yml:sha256:old": errors.New("image is in use")},
+		pullErrs:     map[string]error{},
+		recreateErrs: map[string]error{},
+		imageErrs:    map[string]error{},
 	}
 	var logs bytes.Buffer
 	runner := Runner{Parser: parser, Commander: commander, Logger: watchlog.New(&logs)}
@@ -472,7 +471,6 @@ type fakeCommander struct {
 	recreateErrs  map[string]error
 	cleanupErrs   map[string]error
 	cleanupErrSeq map[string][]error
-	removedImages []string
 }
 
 func (f *fakeCommander) CurrentService(context.Context) (dockercompose.SelfService, bool, error) {
@@ -513,7 +511,6 @@ func (f *fakeCommander) Recreate(_ context.Context, composePath string, service 
 func (f *fakeCommander) RemoveImage(_ context.Context, composePath string, imageID string) error {
 	key := composePath + ":" + imageID
 	f.calls = append(f.calls, "remove:"+key)
-	f.removedImages = append(f.removedImages, imageID)
 	if errs := f.cleanupErrSeq[key]; len(errs) > 0 {
 		err := errs[0]
 		f.cleanupErrSeq[key] = errs[1:]

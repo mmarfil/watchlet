@@ -57,7 +57,6 @@ type composeRun struct {
 type serviceState struct {
 	service    composefile.Service
 	before     string
-	after      string
 	selfUpdate bool
 	failed     bool
 }
@@ -240,8 +239,6 @@ func (r Runner) inspectAndRecreate(ctx context.Context, cfg config.Config, state
 			r.Logger.ActionResult("image-inspect", service.ComposePath, service.Name, "failed", "image-inspect-failed", errors.New("image identity unavailable after pull"))
 			continue
 		}
-		states[i].after = after
-
 		changed := states[i].before != after
 		if !changed && !cfg.Force {
 			result.Current++
