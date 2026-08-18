@@ -26,11 +26,19 @@ Watchlet is a small, Compose-native updater for selected Docker image services.
 - Watchlet uses Docker Compose as the action boundary and anchors commands with the Compose file’s project directory.
 - Cleanup is targeted to old image IDs from successfully changed/recreated services; never add broad prune behavior without revising the architecture.
 - Logs are plain key-value lines with compose/service attribution and command diagnostics when available.
+- An optional result file records timestamps, status, and counts for the latest completed pass.
+
+## Shipping convention
+
+- When the user asks to commit or push release-worthy changes, ask whether to bump the release version before committing.
+- When the user says `ship`, commit the completed work, push `main`, and create the next `v1.x.y` GitHub release.
+- Use a concise release title and notes that summarize user-facing changes and image tags.
+- Creating a release is expected to trigger the GHCR publish workflow for versioned tags.
 
 ## Implementation guidance
 
 - Keep the project small, auditable, and dependency-light.
-- Prefer container configuration through `WATCHLET_COMPOSE` and `WATCHLET_INTERVAL`; keep CLI flags for local/manual runs.
+- Prefer container configuration through `WATCHLET_COMPOSE`, `WATCHLET_INTERVAL`, and `WATCHLET_RESULT_FILE`; keep CLI flags for local/manual runs.
 - Keep interval mode as a wrapper around the single update-pass path.
 - Keep Docker/Compose execution isolated behind `internal/dockercompose`.
 - Keep parser/classifier ownership in `internal/composefile`; do not push build/image/label invariants downstream.

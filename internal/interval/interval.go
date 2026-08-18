@@ -3,9 +3,11 @@ package interval
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"watchlet/internal/config"
+	"watchlet/internal/passresult"
 	"watchlet/internal/updatepass"
 	"watchlet/internal/watchlog"
 )
@@ -38,7 +40,11 @@ func Run(ctx context.Context, cfg config.Config, runner PassRunner, logger watch
 			return nil
 		}
 
-		_, err := runner.Run(ctx, cfg)
+		startedAt := time.Now()
+		result, err := runner.Run(ctx, cfg)
+		if writeErr := passresult.Write(cfg.ResultFile, startedAt, time.Now(), result, err); writeErr != nil {
+			err = fmt.Errorf("write pass result: %w", writeErr)
+		}
 		if err != nil {
 			logger.PassEnd("failed", err)
 		} else {

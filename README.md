@@ -46,11 +46,13 @@ services:
       # Right side: path inside the Watchlet container.
       - /Volumes/Docker/Media:/media:ro
       - /Volumes/Docker/System:/system:ro
+      - ./watchlet-state:/state
     environment:
       # Container-side paths to the Compose files mounted above.
       # Separate multiple Compose files with commas.
       WATCHLET_COMPOSE: /media/docker-compose.yml,/system/docker-compose.yml
       WATCHLET_INTERVAL: 24h
+      WATCHLET_RESULT_FILE: /state/last-pass.json
     labels:
       # Optional: lets Watchlet update its own image too.
       - watchlet.enable=true
@@ -90,6 +92,7 @@ Watchlet supports environment variables for container use and CLI flags for loca
 | --- | --- | --- | --- |
 | Compose files | `--compose PATH` repeated | `WATCHLET_COMPOSE=/path/a.yml,/path/b.yml` | required |
 | Interval | `--interval DURATION` | `WATCHLET_INTERVAL=24h` | `24h` |
+| Latest pass result | `--result-file PATH` | `WATCHLET_RESULT_FILE=/state/last-pass.json` | disabled |
 | One-shot mode | `--once` | none | interval mode |
 | Force recreate | `--force` with `--once` | none | disabled |
 
@@ -138,6 +141,8 @@ Watchlet passes each configured Compose file to Docker Compose with that file’
 For image identity checks, Watchlet resolves the effective image reference with Docker Compose config output before running `docker image inspect`. It does not parse `docker compose pull` prose to decide whether an update occurred.
 
 If one Compose file or service fails, Watchlet logs the failure, continues with the remaining configured Compose files, and reports a failed final summary for that pass.
+
+When a result path is configured, Watchlet atomically replaces that JSON file after each completed pass with its timestamps, status, and summary counts. It remains disabled by default and contains no command diagnostics or credentials. A self-update may stop the old process before it writes the result; the newly started Watchlet records the next completed pass.
 
 ## Logs
 

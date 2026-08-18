@@ -6,9 +6,11 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"watchlet/internal/config"
 	"watchlet/internal/interval"
+	"watchlet/internal/passresult"
 	"watchlet/internal/updatepass"
 	"watchlet/internal/watchlog"
 )
@@ -31,8 +33,14 @@ func main() {
 
 	runner := updatepass.New(os.Stdout, nil)
 	if cfg.Once {
-		if _, err := runner.Run(ctx, cfg); err != nil {
-			fmt.Fprintf(os.Stderr, "watchlet: update pass failed: %v\n", err)
+		startedAt := time.Now()
+		result, passErr := runner.Run(ctx, cfg)
+		if err := passresult.Write(cfg.ResultFile, startedAt, time.Now(), result, passErr); err != nil {
+			fmt.Fprintf(os.Stderr, "watchlet: write pass result: %v\n", err)
+			os.Exit(1)
+		}
+		if passErr != nil {
+			fmt.Fprintf(os.Stderr, "watchlet: update pass failed: %v\n", passErr)
 			os.Exit(1)
 		}
 		return

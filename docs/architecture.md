@@ -40,6 +40,7 @@ The current implementation is organized around these packages:
 - `internal/dockercompose` — the command boundary for Docker and Docker Compose CLI calls.
 - `internal/updatepass` — one update pass across configured Compose files.
 - `internal/interval` — repeated execution of the same update pass.
+- `internal/passresult` — atomic writing of the optional latest-pass result.
 - `internal/watchlog` — plain key-value logging helpers.
 
 Dependencies should remain minimal and justified. The Compose parser currently uses `gopkg.in/yaml.v3` directly.
@@ -52,8 +53,10 @@ Watchlet supports both CLI flags and environment variables. CLI flags override e
 
 - `WATCHLET_COMPOSE` — comma-separated Compose file paths.
 - `WATCHLET_INTERVAL` — Go duration string such as `24h`, `1h`, or `30m`.
+- `WATCHLET_RESULT_FILE` — optional path atomically replaced with the latest completed pass result.
 - `--compose PATH` — may be repeated for multiple Compose files.
 - `--interval DURATION` — overrides `WATCHLET_INTERVAL`.
+- `--result-file PATH` — overrides `WATCHLET_RESULT_FILE`.
 - `--once` — runs one update pass and exits.
 - `--force` — valid with `--once`; recreates selected image services after pulling even when image identity is unchanged.
 
@@ -131,6 +134,8 @@ Image identity checks use Docker’s resolved local image ID. Watchlet does not 
 An empty pre-pull identity is allowed because the image may not exist locally yet. After a successful pull, an empty post-pull identity is a service failure.
 
 Long-running interval mode calls the same update-pass path repeatedly. It must not duplicate update logic.
+
+When configured, one latest-pass JSON result is atomically replaced after each completed pass. It contains timestamps, status, and aggregate counts only. It is a local supervision seam, not a notification or integration framework. A self-recreate may interrupt the old process before this final write; the next completed pass replaces the result.
 
 Watchlet self-update requires no separate environment variable. If the running Watchlet service is selected with `watchlet.enable=true`, the update pass identifies it from the current container's Docker Compose labels and bind mounts, inspecting cgroup-derived container IDs before hostname fallback. It records its pre-pull identity with the rest of its Compose file and handles its pull/recreate last. A diagnostic failure while checking the current container is fatal for the pass; Watchlet must not fall back to normal-order self recreation when self identity is inconclusive. A changed Watchlet image may interrupt the active process during the final self-recreate; this must not happen before other services have completed their normal update checks, and the owning Compose file must have a pre-self-update result log before the self-recreate starts.
 

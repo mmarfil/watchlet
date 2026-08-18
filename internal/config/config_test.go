@@ -86,6 +86,36 @@ func TestLoadIntervalFromEnv(t *testing.T) {
 	}
 }
 
+func TestLoadResultFileFlagOverridesEnv(t *testing.T) {
+	workdir := t.TempDir()
+	cfg, err := Load(
+		[]string{"--compose", "compose.yml", "--result-file", "flag.json"},
+		env(map[string]string{EnvResultFile: "env.json"}),
+		workdir,
+	)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.ResultFile != filepath.Join(workdir, "flag.json") {
+		t.Fatalf("ResultFile = %q", cfg.ResultFile)
+	}
+}
+
+func TestLoadResultFileFromEnv(t *testing.T) {
+	workdir := t.TempDir()
+	cfg, err := Load(
+		[]string{"--compose", "compose.yml"},
+		env(map[string]string{EnvResultFile: "state/last-pass.json"}),
+		workdir,
+	)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.ResultFile != filepath.Join(workdir, "state/last-pass.json") {
+		t.Fatalf("ResultFile = %q", cfg.ResultFile)
+	}
+}
+
 func TestLoadRejectsInvalidInterval(t *testing.T) {
 	_, err := Load([]string{"--compose", "compose.yml", "--interval", "soon"}, emptyEnv, t.TempDir())
 	if err == nil || !strings.Contains(err.Error(), "invalid --interval duration") {

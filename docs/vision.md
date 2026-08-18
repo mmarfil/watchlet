@@ -27,6 +27,7 @@ It should:
 - clean up only old image IDs from services it successfully updated
 - update its own selected Watchlet service without a separate self-update setting, handling that recreate last
 - emit clear key-value logs for every meaningful decision and action
+- optionally write one machine-readable latest-pass result for local supervision
 
 The value is confidence: users should understand what Watchlet can touch, why it acts, and what it refuses to touch.
 

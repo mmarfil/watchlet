@@ -12,13 +12,15 @@ import (
 const (
 	DefaultInterval = 24 * time.Hour
 
-	EnvCompose  = "WATCHLET_COMPOSE"
-	EnvInterval = "WATCHLET_INTERVAL"
+	EnvCompose    = "WATCHLET_COMPOSE"
+	EnvInterval   = "WATCHLET_INTERVAL"
+	EnvResultFile = "WATCHLET_RESULT_FILE"
 )
 
 type Config struct {
 	ComposePaths []string
 	Interval     time.Duration
+	ResultFile   string
 	Once         bool
 	Force        bool
 }
@@ -47,6 +49,7 @@ func Load(args []string, getenv func(string) string, workdir string) (Config, er
 	fs.SetOutput(&strings.Builder{})
 	fs.Var(&compose, "compose", "Docker Compose file path; may be repeated")
 	fs.StringVar(&intervalValue, "interval", "", "update interval as a Go duration")
+	fs.StringVar(&cfg.ResultFile, "result-file", "", "write the latest pass result as JSON")
 	fs.BoolVar(&cfg.Once, "once", false, "run one update pass and exit")
 	fs.BoolVar(&cfg.Force, "force", false, "recreate selected image services after pulling")
 
@@ -82,6 +85,16 @@ func Load(args []string, getenv func(string) string, workdir string) (Config, er
 	}
 	if err != nil {
 		return Config{}, err
+	}
+
+	if !flagWasSet["result-file"] {
+		cfg.ResultFile = strings.TrimSpace(getenv(EnvResultFile))
+	}
+	if cfg.ResultFile != "" && !filepath.IsAbs(cfg.ResultFile) {
+		cfg.ResultFile = filepath.Join(workdir, cfg.ResultFile)
+	}
+	if cfg.ResultFile != "" {
+		cfg.ResultFile = filepath.Clean(cfg.ResultFile)
 	}
 
 	if cfg.Force && !cfg.Once {
