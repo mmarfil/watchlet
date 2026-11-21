@@ -7,9 +7,7 @@ Watchlet is a small, Compose-native updater for selected Docker image services.
 - Treat `docs/vision.md` and `docs/architecture.md` as the current product and architecture contract.
 - Read `docs/vision.md` before product-shaping, scope, UX, or feature work.
 - Read `docs/architecture.md` before implementation, dependency, runtime, or architectural changes.
-- Stop and surface conflicts instead of improvising around either document.
-- Do not widen scope beyond those docs unless the user explicitly asks.
-- Propose revising the docs when the contract no longer fits.
+- When a request conflicts with or goes beyond either document, say so and propose a revision rather than building around it.
 
 ## Current product surface
 
