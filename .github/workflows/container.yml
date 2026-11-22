@@ -13,7 +13,17 @@ permissions:
   packages: write
 
 jobs:
+  self-update-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check Watchlet self-update end to end
+        run: scripts/self-update-e2e.sh
+
   publish:
+    needs: self-update-e2e
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository

@@ -19,8 +19,8 @@ Watchlet is a small, Compose-native updater for selected Docker image services.
 - CLI flags override environment variables.
 - Default interval is `24h`.
 - `watchlet` runs interval mode; `watchlet --once` runs one pass.
-- `watchlet --once --force` recreates selected image services after pulling even when identity is unchanged.
-- A selected Watchlet service updates itself automatically without an environment variable and is handled last in the pass.
+- `watchlet --once --force` recreates selected image services after pulling even when identity is unchanged, except Watchlet's own service, which is recreated only when its image changed.
+- A selected Watchlet service updates itself automatically without an environment variable and is handled last in the pass. Its recreate is handed to a short-lived `<container-name>-self-update` helper container, because a Compose recreate run inside the container being replaced is killed partway through. The next pass reports the helper's result and removes the previous Watchlet image. Watchlet's own change is detected against the image its running container uses. Self-update requires the mounted Docker socket; a non-unix `DOCKER_HOST` refuses the handoff. Helpers are found by their labels (service and Compose path), not by the current container name. The `<container-name>-self-update` name is reserved, and a same-named container that is not this service's helper is never removed.
 - Watchlet uses Docker Compose as the action boundary and anchors commands with the Compose file’s project directory.
 - Compose folders must be mounted into Watchlet at their host path: Compose runs inside Watchlet and resolves relative bind sources and the default project name from the path Watchlet sees, then sends them to the host daemon. Other mount layouts are not supported.
 - Cleanup is targeted to old image IDs from successfully changed/recreated services; never add broad prune behavior without revising the architecture.
@@ -42,4 +42,5 @@ Watchlet is a small, Compose-native updater for selected Docker image services.
 - Keep Docker/Compose execution isolated behind `internal/dockercompose`.
 - Keep parser/classifier ownership in `internal/composefile`; do not push build/image/label invariants downstream.
 - Keep update decisions in `internal/updatepass`; do not parse Docker Compose pull prose as truth.
+- Never run the Compose recreate of Watchlet's own service from inside its own container; `scripts/self-update-e2e.sh` checks the real self-update and gates publishing.
 - Update `README.md`, this file, `AGENTS.md`, `docs/vision.md`, and `docs/architecture.md` together when product behavior changes.

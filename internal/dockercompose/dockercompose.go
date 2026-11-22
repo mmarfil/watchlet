@@ -10,7 +10,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 )
 
 type CommandOutput struct {
@@ -46,9 +48,33 @@ var containerIndicatorPaths = []string{"/.dockerenv", "/run/.containerenv"}
 var containerCgroupPaths = []string{"/proc/1/cgroup", "/proc/self/cgroup"}
 
 type SelfService struct {
-	Service      string
-	ComposePaths []string
+	Service       string
+	ComposePaths  []string
+	ContainerID   string
+	ContainerName string
+	ImageID       string
 }
+
+// SelfUpdateOutcome is what a finished self-update helper left behind.
+// Err is set when the helper's Compose recreate failed. Pending means the
+// helper was still running after the wait and was left for the next pass.
+type SelfUpdateOutcome struct {
+	Helper      string
+	ComposePath string
+	Service     string
+	OldImageID  string
+	Pending     bool
+	Err         error
+}
+
+const (
+	selfUpdateComposeLabel  = "watchlet.self-update.compose"
+	selfUpdateServiceLabel  = "watchlet.self-update.service"
+	selfUpdateOldImageLabel = "watchlet.self-update.old-image"
+)
+
+var selfUpdateHelperWait = 30 * time.Second
+var processEnviron = os.Environ
 
 type composeConfig struct {
 	Services map[string]composeConfigService `json:"services"`
@@ -59,6 +85,14 @@ type composeConfigService struct {
 }
 
 type containerInspect struct {
+	ID    string `json:"Id"`
+	Name  string `json:"Name"`
+	Image string `json:"Image"`
+	State struct {
+		Status   string `json:"Status"`
+		Running  bool   `json:"Running"`
+		ExitCode int    `json:"ExitCode"`
+	} `json:"State"`
 	Config struct {
 		Labels map[string]string `json:"Labels"`
 	} `json:"Config"`
@@ -161,7 +195,13 @@ func (c Client) CurrentService(ctx context.Context) (SelfService, bool, error) {
 			composePaths = appendUnique(composePaths, seenPaths, translated)
 		}
 	}
-	return SelfService{Service: service, ComposePaths: composePaths}, true, nil
+	return SelfService{
+		Service:       service,
+		ComposePaths:  composePaths,
+		ContainerID:   inspected[0].ID,
+		ContainerName: strings.TrimPrefix(inspected[0].Name, "/"),
+		ImageID:       inspected[0].Image,
+	}, true, nil
 }
 
 func (c Client) Pull(ctx context.Context, composePath string, service string) error {
@@ -173,17 +213,209 @@ func (c Client) Pull(ctx context.Context, composePath string, service string) er
 }
 
 func (c Client) Recreate(ctx context.Context, composePath string, service string, force bool) error {
-	args := composeArgs(composePath, "up", "-d", "--no-deps")
-	if force {
-		args = append(args, "--force-recreate")
-	}
-	args = append(args, service)
-
-	output, err := c.runner.Run(ctx, "docker", args...)
+	output, err := c.runner.Run(ctx, "docker", recreateArgs(composePath, service, force)...)
 	if err != nil {
 		return commandError("recreate", composePath, service, "", output, err)
 	}
 	return nil
+}
+
+// HandOffSelfRecreate starts a helper container that runs the Compose recreate
+// of Watchlet's own service. Compose stops the old container partway through a
+// recreate, which kills any Compose client running inside it, so the recreate
+// must run in a container that outlives the current one.
+func (c Client) HandOffSelfRecreate(ctx context.Context, self SelfService, composePath string, service string, force bool, oldImageID string) (string, error) {
+	if self.ContainerID == "" || self.ContainerName == "" || self.ImageID == "" {
+		return "", commandError("self-update-handoff", composePath, service, "", CommandOutput{}, errors.New("current container identity is incomplete"))
+	}
+	if scheme, ok := nonSocketDockerHost(); ok {
+		return "", commandError("self-update-handoff", composePath, service, "", CommandOutput{}, fmt.Errorf("self-update needs the Docker socket mounted into Watchlet; DOCKER_HOST uses %s", scheme))
+	}
+	helper := selfUpdateHelperName(self)
+	args := []string{"run", "-d", "--name", helper, "--network", "none", "--volumes-from", self.ContainerID}
+	for _, name := range environmentNames() {
+		args = append(args, "-e", name)
+	}
+	args = append(args,
+		"--label", selfUpdateComposeLabel+"="+composePath,
+		"--label", selfUpdateServiceLabel+"="+service,
+	)
+	if oldImageID != "" {
+		args = append(args, "--label", selfUpdateOldImageLabel+"="+oldImageID)
+	}
+	args = append(args, "--entrypoint", "docker", self.ImageID)
+	args = append(args, recreateArgs(composePath, service, force)...)
+
+	output, err := c.runner.Run(ctx, "docker", args...)
+	if err != nil {
+		return "", commandError("self-update-handoff", composePath, service, "", output, err)
+	}
+	return helper, nil
+}
+
+// CollectSelfUpdate reads and removes a self-update helper left by an earlier
+// pass for this Watchlet service, if there is one. Helpers are found by their
+// labels rather than by name, because the container that started a helper (a
+// one-off `docker compose run`, or one with a different container_name) may
+// not share the current container's name.
+func (c Client) CollectSelfUpdate(ctx context.Context, self SelfService) (SelfUpdateOutcome, bool, error) {
+	output, err := c.runner.Run(ctx, "docker", "container", "ls", "-a", "--filter", "label="+selfUpdateServiceLabel+"="+self.Service, "--format", "{{.Names}}")
+	if err != nil {
+		return SelfUpdateOutcome{}, true, commandError("self-update-collect", "", self.Service, "", output, err)
+	}
+	for _, name := range strings.Fields(output.Stdout) {
+		helper, found, err := c.inspectHelper(ctx, name)
+		if err != nil {
+			return SelfUpdateOutcome{Helper: name}, true, err
+		}
+		if found && composePathIn(helper.Config.Labels[selfUpdateComposeLabel], self.ComposePaths) {
+			return c.collectHelper(ctx, name, helper)
+		}
+	}
+
+	reserved := selfUpdateHelperName(self)
+	_, found, err := c.inspectHelper(ctx, reserved)
+	if err != nil {
+		return SelfUpdateOutcome{Helper: reserved}, true, err
+	}
+	if !found {
+		return SelfUpdateOutcome{}, false, nil
+	}
+	return SelfUpdateOutcome{Helper: reserved}, true, commandError("self-update-collect", "", "", "", CommandOutput{}, fmt.Errorf("container %s exists but is not a self-update helper for this Watchlet service; leaving it untouched", reserved))
+}
+
+func (c Client) inspectHelper(ctx context.Context, name string) (containerInspect, bool, error) {
+	output, err := c.runner.Run(ctx, "docker", "container", "inspect", name)
+	if err != nil {
+		if isNotFoundOutput(output.Combined()) {
+			return containerInspect{}, false, nil
+		}
+		return containerInspect{}, false, commandError("self-update-collect", "", "", "", output, err)
+	}
+	var inspected []containerInspect
+	if err := json.Unmarshal([]byte(output.Stdout), &inspected); err != nil || len(inspected) == 0 {
+		if err == nil {
+			err = errors.New("helper inspect returned no containers")
+		}
+		return containerInspect{}, false, commandError("self-update-collect", "", "", "", output, err)
+	}
+	return inspected[0], true, nil
+}
+
+func (c Client) collectHelper(ctx context.Context, helper string, inspected containerInspect) (SelfUpdateOutcome, bool, error) {
+	labels := inspected.Config.Labels
+	outcome := SelfUpdateOutcome{
+		Helper:      helper,
+		ComposePath: labels[selfUpdateComposeLabel],
+		Service:     labels[selfUpdateServiceLabel],
+		OldImageID:  labels[selfUpdateOldImageLabel],
+	}
+	collectError := func(output CommandOutput, err error) (SelfUpdateOutcome, bool, error) {
+		return outcome, true, commandError("self-update-collect", outcome.ComposePath, outcome.Service, "", output, err)
+	}
+
+	state := inspected.State
+	exitCode := state.ExitCode
+	switch {
+	case state.Running:
+		waitCtx, cancel := context.WithTimeout(ctx, selfUpdateHelperWait)
+		output, err := c.runner.Run(waitCtx, "docker", "container", "wait", helper)
+		deadlineExceeded := errors.Is(waitCtx.Err(), context.DeadlineExceeded)
+		cancel()
+		if deadlineExceeded {
+			outcome.Pending = true
+			return outcome, true, nil
+		}
+		if err != nil {
+			return collectError(output, err)
+		}
+		exitCode, err = strconv.Atoi(strings.TrimSpace(output.Stdout))
+		if err != nil {
+			return collectError(output, err)
+		}
+	case state.Status != "exited":
+		// A helper that never ran (for example "created" when docker run was
+		// interrupted before start) also reports exit code 0.
+		outcome.Err = commandError("self-update", outcome.ComposePath, outcome.Service, "", CommandOutput{}, fmt.Errorf("helper %s never ran: status %s", helper, state.Status))
+	}
+
+	if outcome.Err == nil && exitCode != 0 {
+		exitErr := fmt.Errorf("helper %s exited with code %d", helper, exitCode)
+		logs, err := c.runner.Run(ctx, "docker", "container", "logs", helper)
+		if err != nil {
+			exitErr = fmt.Errorf("helper %s exited with code %d; its output could not be read: %w", helper, exitCode, err)
+		}
+		outcome.Err = commandError("self-update", outcome.ComposePath, outcome.Service, "", logs, exitErr)
+	}
+	if outcome.Err != nil {
+		outcome.OldImageID = ""
+	}
+
+	output, err := c.runner.Run(ctx, "docker", "container", "rm", helper)
+	if err != nil {
+		return collectError(output, err)
+	}
+	return outcome, true, nil
+}
+
+func composePathIn(path string, paths []string) bool {
+	if path == "" {
+		return false
+	}
+	for _, candidate := range paths {
+		if filepath.Clean(candidate) == filepath.Clean(path) {
+			return true
+		}
+	}
+	return false
+}
+
+func selfUpdateHelperName(self SelfService) string {
+	return self.ContainerName + "-self-update"
+}
+
+// environmentNames lists the variables the helper should inherit by name, so
+// Compose interpolation in the helper matches Watchlet's without values
+// appearing in the docker run command line.
+func environmentNames() []string {
+	names := []string{}
+	for _, entry := range processEnviron() {
+		name, _, _ := strings.Cut(entry, "=")
+		if name == "" || name == "HOSTNAME" {
+			continue
+		}
+		names = append(names, name)
+	}
+	return names
+}
+
+// nonSocketDockerHost reports the scheme of DOCKER_HOST when it points
+// somewhere other than a unix socket. The helper runs without a network, so it
+// can only reach Docker through the socket it inherits from Watchlet.
+func nonSocketDockerHost() (string, bool) {
+	for _, entry := range processEnviron() {
+		name, value, _ := strings.Cut(entry, "=")
+		if name != "DOCKER_HOST" || value == "" {
+			continue
+		}
+		scheme, _, found := strings.Cut(value, "://")
+		if !found {
+			return "an unrecognized address", true
+		}
+		if scheme == "unix" {
+			return "", false
+		}
+		return scheme + "://", true
+	}
+	return "", false
+}
+
+func recreateArgs(composePath string, service string, force bool) []string {
+	args := composeArgs(composePath, "up", "-d", "--no-deps")
+	if force {
+		args = append(args, "--force-recreate")
+	}
+	return append(args, service)
 }
 
 func (c Client) ImageID(ctx context.Context, composePath string, service string) (string, error) {

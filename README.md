@@ -61,7 +61,7 @@ Mount every Compose project folder into Watchlet at the same path it has on the 
 
 The published image includes the `watchlet` binary plus Docker CLI and the Docker Compose plugin, because Watchlet performs updates by calling `docker compose` against the mounted Docker socket.
 
-The `watchlet.enable=true` label on the Watchlet service lets Watchlet update itself. Watchlet handles its own service last, after the rest of the pass is finished, because recreating itself restarts the updater. If you prefer to update Watchlet manually, omit that label and run `docker compose pull watchlet && docker compose up -d watchlet` when you want a new version.
+The `watchlet.enable=true` label on the Watchlet service lets Watchlet update itself. Watchlet handles its own service last, after the rest of the pass is finished, because recreating itself restarts the updater. It cannot safely recreate its own container from inside that container, so it starts a short-lived helper container named after its own container with `-self-update` appended (for example `watchlet-self-update`) from its current image, with the same mounts, which runs the same `docker compose up` for the Watchlet service. The new Watchlet logs the helper's result as `operation=self-update` on its next pass, removes the helper, and removes the previous Watchlet image. If a self-update ever leaves Watchlet stopped, `docker logs watchlet-self-update` shows what Compose reported. No extra configuration is needed, but self-update requires the Docker socket mounted as shown above; if Watchlet reaches Docker over the network through `DOCKER_HOST`, for example via a socket proxy, it logs the self-update as failed and you update it by hand. Don't use the `<container name>-self-update` name for your own containers. If you prefer to update Watchlet manually, omit that label and run `docker compose pull watchlet && docker compose up -d watchlet` when you want a new version.
 
 Then opt in individual services inside those Compose files:
 
@@ -84,6 +84,16 @@ services:
 ```
 
 Local builds are not supported. Services that define `build:` are skipped and reported, even when they also define `image:`.
+
+## Upgrading from a version without the self-update helper
+
+Watchlet versions released before the self-update helper recreate themselves from inside their own container, which leaves Watchlet stopped. The old version performs the upgrade, so the first update to a version with the helper can still leave Watchlet stopped once. To avoid that, update Watchlet by hand that one time, from the directory of its Compose file:
+
+```sh
+docker compose pull watchlet && docker compose up -d watchlet
+```
+
+If Watchlet is already stopped after that upgrade, the same command starts the new version. There is no `watchlet-self-update` container to inspect in this case, because the old version never creates one. Later self-updates go through the helper.
 
 ## Configuration
 
@@ -115,7 +125,7 @@ Run one update pass and exit:
 watchlet --once --compose /Volumes/Docker/Media/docker-compose.yml
 ```
 
-Run one forced pass. Force mode still respects labels and skips `build:` services, but recreates selected `image:` services after pulling even when the image identity is unchanged:
+Run one forced pass. Force mode still respects labels and skips `build:` services, but recreates selected `image:` services after pulling even when the image identity is unchanged. Watchlet's own service is the exception: it is recreated only when its image changed, because a forced self-recreate would start a new Watchlet that runs the same forced pass again:
 
 ```sh
 watchlet --once --force --compose /Volumes/Docker/Media/docker-compose.yml

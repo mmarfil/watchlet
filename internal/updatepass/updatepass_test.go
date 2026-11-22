@@ -194,8 +194,8 @@ func TestRunDefersWatchletSelfUpdateUntilEndOfPass(t *testing.T) {
 			{ComposePath: "main.yml", Name: "sonarr", Image: "lscr.io/linuxserver/sonarr"},
 		}},
 	}}
-	commander := &fakeCommander{selfService: dockercompose.SelfService{Service: "watchlet", ComposePaths: []string{"system.yml"}}, hasSelf: true, imageIDs: map[string][]string{
-		"system.yml/watchlet": {"sha256:old-watchlet", "sha256:new-watchlet"},
+	commander := &fakeCommander{selfService: dockercompose.SelfService{Service: "watchlet", ComposePaths: []string{"system.yml"}, ImageID: "sha256:old-watchlet"}, hasSelf: true, imageIDs: map[string][]string{
+		"system.yml/watchlet": {"sha256:new-watchlet"},
 		"system.yml/nginx":    {"sha256:same-nginx", "sha256:same-nginx"},
 		"main.yml/sonarr":     {"sha256:same-sonarr", "sha256:same-sonarr"},
 	}}
@@ -210,12 +210,13 @@ func TestRunDefersWatchletSelfUpdateUntilEndOfPass(t *testing.T) {
 		t.Fatalf("result = %#v", result)
 	}
 	assertCalls(t, commander.calls, []string{
-		"image:system.yml/watchlet", "image:system.yml/nginx",
+		"collect",
+		"image:system.yml/nginx",
 		"pull:system.yml/nginx", "image:system.yml/nginx",
 		"image:main.yml/sonarr", "pull:main.yml/sonarr", "image:main.yml/sonarr",
-		"pull:system.yml/watchlet", "image:system.yml/watchlet", "recreate:system.yml/watchlet", "remove:system.yml:sha256:old-watchlet",
+		"pull:system.yml/watchlet", "image:system.yml/watchlet", "handoff:system.yml/watchlet:old=sha256:old-watchlet",
 	})
-	if !strings.Contains(logs.String(), "reason=self-update-last") || !strings.Contains(logs.String(), "reason=self-update-recreate") {
+	if !strings.Contains(logs.String(), "reason=self-update-last") || !strings.Contains(logs.String(), "reason=self-update-recreate") || !strings.Contains(logs.String(), "status=handed-off") {
 		t.Fatalf("logs missing self-update ordering markers:\n%s", logs.String())
 	}
 }
@@ -228,10 +229,10 @@ func TestRunDefersOnlyCurrentWatchletService(t *testing.T) {
 		}},
 	}}
 	commander := &fakeCommander{
-		selfService: dockercompose.SelfService{Service: "updater", ComposePaths: []string{"system.yml"}},
+		selfService: dockercompose.SelfService{Service: "updater", ComposePaths: []string{"system.yml"}, ImageID: "sha256:old"},
 		hasSelf:     true,
 		imageIDs: map[string][]string{
-			"system.yml/updater": {"sha256:old", "sha256:new"},
+			"system.yml/updater": {"sha256:new"},
 			"system.yml/app":     {"sha256:old", "sha256:new"},
 		},
 	}
@@ -246,11 +247,239 @@ func TestRunDefersOnlyCurrentWatchletService(t *testing.T) {
 		t.Fatalf("result = %#v", result)
 	}
 	assertCalls(t, commander.calls, []string{
-		"image:system.yml/updater", "image:system.yml/app",
+		"collect",
+		"image:system.yml/app",
 		"pull:system.yml/app", "image:system.yml/app", "recreate:system.yml/app",
 		"remove:system.yml:sha256:old",
-		"pull:system.yml/updater", "image:system.yml/updater", "recreate:system.yml/updater",
+		"pull:system.yml/updater", "image:system.yml/updater", "handoff:system.yml/updater:old=sha256:old",
 	})
+}
+
+func TestRunForceSkipsUnchangedWatchletSelfUpdate(t *testing.T) {
+	parser := &fakeParser{files: map[string]composefile.File{
+		"system.yml": {Services: []composefile.Service{
+			{ComposePath: "system.yml", Name: "watchlet", Image: "ghcr.io/mmarfil/watchlet:latest"},
+			{ComposePath: "system.yml", Name: "app", Image: "example/app:latest"},
+		}},
+	}}
+	commander := &fakeCommander{
+		selfService: dockercompose.SelfService{Service: "watchlet", ComposePaths: []string{"system.yml"}, ImageID: "sha256:same"},
+		hasSelf:     true,
+		imageIDs: map[string][]string{
+			"system.yml/watchlet": {"sha256:same"},
+			"system.yml/app":      {"sha256:app", "sha256:app"},
+		},
+	}
+	var logs bytes.Buffer
+	runner := Runner{Parser: parser, Commander: commander, Logger: watchlog.New(&logs)}
+
+	result, err := runner.Run(context.Background(), config.Config{ComposePaths: []string{"system.yml"}, Interval: 24 * time.Hour, Once: true, Force: true})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if result.Forced != 1 || result.Current != 1 || result.Updated != 0 || result.Failed != 0 {
+		t.Fatalf("result = %#v", result)
+	}
+	assertCalls(t, commander.calls, []string{
+		"collect",
+		"image:system.yml/app", "pull:system.yml/app", "image:system.yml/app", "recreate-force:system.yml/app",
+		"pull:system.yml/watchlet", "image:system.yml/watchlet",
+	})
+	if !strings.Contains(logs.String(), "service=watchlet status=skipped reason=force-skips-self") {
+		t.Fatalf("logs missing force-skips-self:\n%s", logs.String())
+	}
+}
+
+func TestRunForceHandsOffChangedWatchletSelfUpdate(t *testing.T) {
+	parser := &fakeParser{files: map[string]composefile.File{
+		"system.yml": {Services: []composefile.Service{{ComposePath: "system.yml", Name: "watchlet", Image: "ghcr.io/mmarfil/watchlet:latest"}}},
+	}}
+	commander := &fakeCommander{
+		selfService: dockercompose.SelfService{Service: "watchlet", ComposePaths: []string{"system.yml"}, ImageID: "sha256:old"},
+		hasSelf:     true,
+		imageIDs:    map[string][]string{"system.yml/watchlet": {"sha256:new"}},
+	}
+	var logs bytes.Buffer
+	runner := Runner{Parser: parser, Commander: commander, Logger: watchlog.New(&logs)}
+
+	result, err := runner.Run(context.Background(), config.Config{ComposePaths: []string{"system.yml"}, Interval: 24 * time.Hour, Once: true, Force: true})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if result.Updated != 1 || result.Forced != 0 || result.Failed != 0 {
+		t.Fatalf("result = %#v", result)
+	}
+	assertCalls(t, commander.calls, []string{
+		"collect", "pull:system.yml/watchlet", "image:system.yml/watchlet", "handoff-force:system.yml/watchlet:old=sha256:old",
+	})
+}
+
+func TestRunRetriesSelfUpdateWhenRunningImageIsBehindTag(t *testing.T) {
+	parser := &fakeParser{files: map[string]composefile.File{
+		"system.yml": {Services: []composefile.Service{{ComposePath: "system.yml", Name: "watchlet", Image: "ghcr.io/mmarfil/watchlet:latest"}}},
+	}}
+	commander := &fakeCommander{
+		selfService: dockercompose.SelfService{Service: "watchlet", ComposePaths: []string{"system.yml"}, ImageID: "sha256:v1"},
+		hasSelf:     true,
+		// The tag already points at v2 from an earlier pass whose handoff failed.
+		imageIDs: map[string][]string{"system.yml/watchlet": {"sha256:v2"}},
+	}
+	var logs bytes.Buffer
+	runner := Runner{Parser: parser, Commander: commander, Logger: watchlog.New(&logs)}
+
+	result, err := runner.Run(context.Background(), config.Config{ComposePaths: []string{"system.yml"}, Interval: 24 * time.Hour, Once: true})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if result.Updated != 1 || result.Current != 0 {
+		t.Fatalf("result = %#v", result)
+	}
+	assertCalls(t, commander.calls, []string{
+		"collect", "pull:system.yml/watchlet", "image:system.yml/watchlet", "handoff:system.yml/watchlet:old=sha256:v1",
+	})
+}
+
+func TestRunReportsSelfUpdateHandoffFailureAsRecreateFailure(t *testing.T) {
+	parser := &fakeParser{files: map[string]composefile.File{
+		"system.yml": {Services: []composefile.Service{{ComposePath: "system.yml", Name: "watchlet", Image: "ghcr.io/mmarfil/watchlet:latest"}}},
+	}}
+	commander := &fakeCommander{
+		selfService: dockercompose.SelfService{Service: "watchlet", ComposePaths: []string{"system.yml"}, ImageID: "sha256:old"},
+		hasSelf:     true,
+		imageIDs:    map[string][]string{"system.yml/watchlet": {"sha256:new"}},
+		handoffErr:  errors.New("Conflict. The container name \"/watchlet-self-update\" is already in use"),
+	}
+	var logs bytes.Buffer
+	runner := Runner{Parser: parser, Commander: commander, Logger: watchlog.New(&logs)}
+
+	result, err := runner.Run(context.Background(), config.Config{ComposePaths: []string{"system.yml"}, Interval: 24 * time.Hour, Once: true})
+	if err == nil {
+		t.Fatal("expected pass error")
+	}
+	if result.Failed != 1 || result.Updated != 0 {
+		t.Fatalf("result = %#v", result)
+	}
+	for _, want := range []string{"reason=recreate-failed", "already in use", "action=pass-summary status=failed"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("logs missing %q:\n%s", want, logs.String())
+		}
+	}
+}
+
+func TestRunReportsSuccessfulSelfUpdateAndRemovesPreviousImage(t *testing.T) {
+	parser := &fakeParser{files: map[string]composefile.File{
+		"system.yml": {Services: []composefile.Service{
+			{ComposePath: "system.yml", Name: "watchlet", Image: "ghcr.io/mmarfil/watchlet:latest"},
+			{ComposePath: "system.yml", Name: "nginx", Image: "jc21/nginx-proxy-manager"},
+		}},
+	}}
+	commander := &fakeCommander{
+		selfService: dockercompose.SelfService{Service: "watchlet", ComposePaths: []string{"system.yml"}, ImageID: "sha256:current"},
+		hasSelf:     true,
+		selfFound:   true,
+		selfOutcome: dockercompose.SelfUpdateOutcome{Helper: "watchlet-self-update", ComposePath: "system.yml", Service: "watchlet", OldImageID: "sha256:previous-watchlet"},
+		imageIDs: map[string][]string{
+			"system.yml/watchlet": {"sha256:current"},
+			"system.yml/nginx":    {"sha256:old-nginx", "sha256:new-nginx"},
+		},
+	}
+	var logs bytes.Buffer
+	runner := Runner{Parser: parser, Commander: commander, Logger: watchlog.New(&logs)}
+
+	result, err := runner.Run(context.Background(), config.Config{ComposePaths: []string{"system.yml"}, Interval: 24 * time.Hour, Once: true})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if result.Updated != 1 || result.Current != 1 || result.Failed != 0 {
+		t.Fatalf("result = %#v", result)
+	}
+	assertCalls(t, commander.calls, []string{
+		"collect", "remove:system.yml:sha256:previous-watchlet",
+		"image:system.yml/nginx",
+		"pull:system.yml/nginx", "image:system.yml/nginx", "recreate:system.yml/nginx",
+		"remove:system.yml:sha256:old-nginx",
+		"pull:system.yml/watchlet", "image:system.yml/watchlet",
+	})
+	if !strings.Contains(logs.String(), "operation=self-update compose=system.yml service=watchlet helper=watchlet-self-update status=ok") {
+		t.Fatalf("logs missing self-update result:\n%s", logs.String())
+	}
+}
+
+func TestRunReportsFailedSelfUpdateHelperAsPassFailure(t *testing.T) {
+	parser := &fakeParser{files: map[string]composefile.File{
+		"system.yml": {Services: []composefile.Service{{ComposePath: "system.yml", Name: "watchlet", Image: "ghcr.io/mmarfil/watchlet:latest"}}},
+	}}
+	helperErr := &dockercompose.CommandError{Action: "self-update", ComposePath: "system.yml", Service: "watchlet", Stderr: "port is already allocated", Err: errors.New("helper watchlet-self-update exited with code 1")}
+	commander := &fakeCommander{
+		selfService: dockercompose.SelfService{Service: "watchlet", ComposePaths: []string{"system.yml"}, ImageID: "sha256:current"},
+		hasSelf:     true,
+		selfFound:   true,
+		selfOutcome: dockercompose.SelfUpdateOutcome{Helper: "watchlet-self-update", ComposePath: "system.yml", Service: "watchlet", OldImageID: "sha256:previous", Err: helperErr},
+		imageIDs:    map[string][]string{"system.yml/watchlet": {"sha256:current"}},
+	}
+	var logs bytes.Buffer
+	runner := Runner{Parser: parser, Commander: commander, Logger: watchlog.New(&logs)}
+
+	result, err := runner.Run(context.Background(), config.Config{ComposePaths: []string{"system.yml"}, Interval: 24 * time.Hour, Once: true})
+	if err == nil {
+		t.Fatal("expected pass error")
+	}
+	if result.Failed != 1 || result.Current != 1 {
+		t.Fatalf("result = %#v", result)
+	}
+	for _, call := range commander.calls {
+		if strings.HasPrefix(call, "remove:") {
+			t.Fatalf("failed self-update must not remove the previous image: %#v", commander.calls)
+		}
+	}
+	for _, want := range []string{"status=failed reason=self-update-failed", "exited with code 1", "stderr=\"port is already allocated\""} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("logs missing %q:\n%s", want, logs.String())
+		}
+	}
+}
+
+func TestRunLeavesRunningSelfUpdateHelperForNextPass(t *testing.T) {
+	commander := &fakeCommander{
+		selfService: dockercompose.SelfService{Service: "watchlet", ComposePaths: []string{"system.yml"}},
+		hasSelf:     true,
+		selfFound:   true,
+		selfOutcome: dockercompose.SelfUpdateOutcome{Helper: "watchlet-self-update", ComposePath: "system.yml", Service: "watchlet", Pending: true},
+	}
+	var logs bytes.Buffer
+	runner := Runner{Parser: &fakeParser{}, Commander: commander, Logger: watchlog.New(&logs)}
+
+	result, err := runner.Run(context.Background(), config.Config{ComposePaths: []string{"system.yml"}, Interval: 24 * time.Hour, Once: true})
+	if err != nil {
+		t.Fatalf("Run returned error: %v", err)
+	}
+	if result.Failed != 0 {
+		t.Fatalf("result = %#v", result)
+	}
+	if !strings.Contains(logs.String(), "status=pending reason=helper-running") {
+		t.Fatalf("logs missing pending helper:\n%s", logs.String())
+	}
+}
+
+func TestRunCountsSelfUpdateCollectionErrorAsFailure(t *testing.T) {
+	commander := &fakeCommander{
+		selfService: dockercompose.SelfService{Service: "watchlet", ComposePaths: []string{"system.yml"}},
+		hasSelf:     true,
+		collectErr:  errors.New("permission denied"),
+	}
+	var logs bytes.Buffer
+	runner := Runner{Parser: &fakeParser{}, Commander: commander, Logger: watchlog.New(&logs)}
+
+	result, err := runner.Run(context.Background(), config.Config{ComposePaths: []string{"system.yml"}, Interval: 24 * time.Hour, Once: true})
+	if err == nil {
+		t.Fatal("expected pass error")
+	}
+	if result.Failed != 1 {
+		t.Fatalf("result = %#v", result)
+	}
+	if !strings.Contains(logs.String(), "reason=self-update-failed error=\"permission denied\"") {
+		t.Fatalf("logs missing collection failure:\n%s", logs.String())
+	}
 }
 
 func TestRunFailsBeforeUpdatesWhenSelfIdentificationFails(t *testing.T) {
@@ -278,7 +507,7 @@ func TestRunFailsBeforeUpdatesWhenSelfIdentificationFails(t *testing.T) {
 	}
 }
 
-func TestRunRetriesFailedPreSelfCleanupAfterSelfRecreate(t *testing.T) {
+func TestRunDoesNotRetryCleanupAfterSelfUpdateHandoff(t *testing.T) {
 	parser := &fakeParser{files: map[string]composefile.File{
 		"system.yml": {Services: []composefile.Service{
 			{ComposePath: "system.yml", Name: "watchlet", Image: "ghcr.io/mmarfil/watchlet:latest"},
@@ -286,13 +515,13 @@ func TestRunRetriesFailedPreSelfCleanupAfterSelfRecreate(t *testing.T) {
 		}},
 	}}
 	commander := &fakeCommander{
-		selfService: dockercompose.SelfService{Service: "watchlet", ComposePaths: []string{"system.yml"}},
+		selfService: dockercompose.SelfService{Service: "watchlet", ComposePaths: []string{"system.yml"}, ImageID: "sha256:old"},
 		hasSelf:     true,
 		imageIDs: map[string][]string{
-			"system.yml/watchlet": {"sha256:old", "sha256:new"},
+			"system.yml/watchlet": {"sha256:new"},
 			"system.yml/helper":   {"sha256:old", "sha256:new"},
 		},
-		cleanupErrSeq: map[string][]error{"system.yml:sha256:old": {errors.New("image in use"), nil}},
+		cleanupErrs: map[string]error{"system.yml:sha256:old": errors.New("image in use")},
 	}
 	var logs bytes.Buffer
 	runner := Runner{Parser: parser, Commander: commander, Logger: watchlog.New(&logs)}
@@ -305,16 +534,14 @@ func TestRunRetriesFailedPreSelfCleanupAfterSelfRecreate(t *testing.T) {
 		t.Fatalf("result = %#v", result)
 	}
 	assertCalls(t, commander.calls, []string{
-		"image:system.yml/watchlet", "image:system.yml/helper",
+		"collect",
+		"image:system.yml/helper",
 		"pull:system.yml/helper", "image:system.yml/helper", "recreate:system.yml/helper",
 		"remove:system.yml:sha256:old",
-		"pull:system.yml/watchlet", "image:system.yml/watchlet", "recreate:system.yml/watchlet",
-		"remove:system.yml:sha256:old",
+		"pull:system.yml/watchlet", "image:system.yml/watchlet", "handoff:system.yml/watchlet:old=sha256:old",
 	})
-	for _, want := range []string{"reason=cleanup-failed", "action=cleanup", "status=ok"} {
-		if !strings.Contains(logs.String(), want) {
-			t.Fatalf("logs missing %q:\n%s", want, logs.String())
-		}
+	if got := strings.Count(logs.String(), "reason=cleanup-failed"); got != 1 {
+		t.Fatalf("cleanup-failed logged %d times, want 1:\n%s", got, logs.String())
 	}
 }
 
@@ -465,6 +692,10 @@ type fakeCommander struct {
 	selfService   dockercompose.SelfService
 	hasSelf       bool
 	selfErr       error
+	selfOutcome   dockercompose.SelfUpdateOutcome
+	selfFound     bool
+	collectErr    error
+	handoffErr    error
 	imageIDs      map[string][]string
 	imageErrs     map[string]error
 	pullErrs      map[string]error
@@ -506,6 +737,20 @@ func (f *fakeCommander) Recreate(_ context.Context, composePath string, service 
 		f.calls = append(f.calls, "recreate:"+key)
 	}
 	return f.recreateErrs[key]
+}
+
+func (f *fakeCommander) HandOffSelfRecreate(_ context.Context, _ dockercompose.SelfService, composePath string, service string, force bool, oldImageID string) (string, error) {
+	call := "handoff:"
+	if force {
+		call = "handoff-force:"
+	}
+	f.calls = append(f.calls, call+composePath+"/"+service+":old="+oldImageID)
+	return service + "-self-update", f.handoffErr
+}
+
+func (f *fakeCommander) CollectSelfUpdate(context.Context, dockercompose.SelfService) (dockercompose.SelfUpdateOutcome, bool, error) {
+	f.calls = append(f.calls, "collect")
+	return f.selfOutcome, f.selfFound, f.collectErr
 }
 
 func (f *fakeCommander) RemoveImage(_ context.Context, composePath string, imageID string) error {

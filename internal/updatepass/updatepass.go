@@ -22,6 +22,8 @@ type Commander interface {
 	ImageID(ctx context.Context, composePath string, service string) (string, error)
 	Pull(ctx context.Context, composePath string, service string) error
 	Recreate(ctx context.Context, composePath string, service string, force bool) error
+	HandOffSelfRecreate(ctx context.Context, self dockercompose.SelfService, composePath string, service string, force bool, oldImageID string) (string, error)
+	CollectSelfUpdate(ctx context.Context, self dockercompose.SelfService) (dockercompose.SelfUpdateOutcome, bool, error)
 	RemoveImage(ctx context.Context, composePath string, imageID string) error
 }
 
@@ -102,6 +104,13 @@ func (r Runner) Run(ctx context.Context, cfg config.Config) (Result, error) {
 		r.Logger.PassSummary("failed", result.ComposeFiles, result.Selected, result.Updated, result.Current, result.Forced, result.Skipped, result.Failed)
 		return result, fmt.Errorf("update pass failed: self-identify: %w", err)
 	}
+	if hasSelfService {
+		previousSelfImages := []cleanupTarget{}
+		result.Failed += r.collectSelfUpdate(ctx, selfService, &previousSelfImages)
+		// The collected helper was the only record of the previous Watchlet image,
+		// so remove it now rather than after this pass's Compose work.
+		cleanupTargets = append(cleanupTargets, r.cleanupTargets(ctx, previousSelfImages, cleanupTracker)...)
+	}
 
 	for _, composePath := range cfg.ComposePaths {
 		fileRun := r.runCompose(ctx, cfg, composePath, selfService, hasSelfService)
@@ -112,12 +121,11 @@ func (r Runner) Run(ctx context.Context, cfg config.Config) (Result, error) {
 		}
 	}
 
-	preSelfFailures := r.cleanupTargets(ctx, cleanupTargets, cleanupTracker)
+	r.cleanupTargets(ctx, cleanupTargets, cleanupTracker)
 	for _, deferredRun := range deferredRuns {
-		selfResult, selfCleanupTargets := r.runDeferredSelfUpdates(ctx, cfg, deferredRun.deferredUpdates)
+		selfResult := r.runDeferredSelfUpdates(ctx, cfg, selfService, deferredRun.deferredUpdates)
 		result.add(selfResult)
 		deferredRun.result.add(selfResult)
-		r.cleanupTargets(ctx, append(selfCleanupTargets, preSelfFailures...), cleanupTracker)
 		r.logComposeResult(deferredRun.composePath, deferredRun.result)
 	}
 
@@ -161,11 +169,11 @@ func (r Runner) runCompose(ctx context.Context, cfg config.Config, composePath s
 		})
 	}
 
-	r.recordBeforeIdentities(ctx, states, &result)
+	r.recordBeforeIdentities(ctx, selfService, states, &result)
 
 	activeStates, deferredUpdates := splitSelfUpdates(states)
 	r.pullServices(ctx, activeStates, &result)
-	cleanupTargets := r.inspectAndRecreate(ctx, cfg, activeStates, &result)
+	cleanupTargets := r.inspectAndRecreate(ctx, cfg, dockercompose.SelfService{}, activeStates, &result)
 
 	if len(deferredUpdates) > 0 {
 		r.logComposeResultWithStatus(composePath, "self-update-deferred", result)
@@ -175,20 +183,56 @@ func (r Runner) runCompose(ctx context.Context, cfg config.Config, composePath s
 	return composeRun{composePath: composePath, result: result, deferredUpdates: deferredUpdates, cleanupTargets: cleanupTargets}
 }
 
-func (r Runner) runDeferredSelfUpdates(ctx context.Context, cfg config.Config, states []serviceState) (Result, []cleanupTarget) {
+func (r Runner) runDeferredSelfUpdates(ctx context.Context, cfg config.Config, self dockercompose.SelfService, states []serviceState) Result {
 	for _, state := range states {
 		r.Logger.ActionResult("self-update", state.service.ComposePath, state.service.Name, "deferred", "self-update-last", nil)
 	}
 
 	var result Result
 	r.pullServices(ctx, states, &result)
-	cleanupTargets := r.inspectAndRecreate(ctx, cfg, states, &result)
-	return result, cleanupTargets
+	r.inspectAndRecreate(ctx, cfg, self, states, &result)
+	return result
 }
 
-func (r Runner) recordBeforeIdentities(ctx context.Context, states []serviceState, result *Result) {
+// collectSelfUpdate reports the self-update helper left by an earlier pass and
+// queues the previous Watchlet image for cleanup when that helper succeeded.
+// It returns the number of failures to count in this pass.
+func (r Runner) collectSelfUpdate(ctx context.Context, self dockercompose.SelfService, cleanupTargets *[]cleanupTarget) int {
+	outcome, found, err := r.Commander.CollectSelfUpdate(ctx, self)
+	if err != nil {
+		r.Logger.SelfUpdate(outcome.ComposePath, outcome.Service, outcome.Helper, "failed", "self-update-failed", err)
+		return 1
+	}
+	if !found {
+		return 0
+	}
+	if outcome.Pending {
+		r.Logger.SelfUpdate(outcome.ComposePath, outcome.Service, outcome.Helper, "pending", "helper-running", nil)
+		return 0
+	}
+	if outcome.Err != nil {
+		r.Logger.SelfUpdate(outcome.ComposePath, outcome.Service, outcome.Helper, "failed", "self-update-failed", outcome.Err)
+		return 1
+	}
+	r.Logger.SelfUpdate(outcome.ComposePath, outcome.Service, outcome.Helper, "ok", "", nil)
+	if outcome.OldImageID != "" {
+		*cleanupTargets = append(*cleanupTargets, cleanupTarget{
+			service:    composefile.Service{ComposePath: outcome.ComposePath, Name: outcome.Service},
+			oldImageID: outcome.OldImageID,
+		})
+	}
+	return 0
+}
+
+func (r Runner) recordBeforeIdentities(ctx context.Context, self dockercompose.SelfService, states []serviceState, result *Result) {
 	for i := range states {
 		if states[i].failed {
+			continue
+		}
+		if states[i].selfUpdate {
+			// Watchlet compares against the image it is actually running, so a
+			// self-update that failed after the pull is retried on later passes.
+			states[i].before = self.ImageID
 			continue
 		}
 		service := states[i].service
@@ -219,7 +263,7 @@ func (r Runner) pullServices(ctx context.Context, states []serviceState, result 
 	}
 }
 
-func (r Runner) inspectAndRecreate(ctx context.Context, cfg config.Config, states []serviceState, result *Result) []cleanupTarget {
+func (r Runner) inspectAndRecreate(ctx context.Context, cfg config.Config, self dockercompose.SelfService, states []serviceState, result *Result) []cleanupTarget {
 	cleanupTargets := []cleanupTarget{}
 	for i := range states {
 		if states[i].failed {
@@ -245,9 +289,26 @@ func (r Runner) inspectAndRecreate(ctx context.Context, cfg config.Config, state
 			r.Logger.ActionResult("recreate", service.ComposePath, service.Name, "skipped", "current", nil)
 			continue
 		}
+		if !changed && states[i].selfUpdate {
+			// Forcing Watchlet's own recreate would start a new Watchlet that
+			// runs the same forced pass again, endlessly.
+			result.Current++
+			r.Logger.ActionResult("recreate", service.ComposePath, service.Name, "skipped", "force-skips-self", nil)
+			continue
+		}
 
-		if states[i].selfUpdate && (changed || cfg.Force) {
+		if states[i].selfUpdate {
 			r.Logger.ActionResult("self-update", service.ComposePath, service.Name, "starting", "self-update-recreate", nil)
+			helper, err := r.Commander.HandOffSelfRecreate(ctx, self, service.ComposePath, service.Name, cfg.Force, states[i].before)
+			if err != nil {
+				states[i].failed = true
+				result.Failed++
+				r.Logger.ActionResult("recreate", service.ComposePath, service.Name, "failed", "recreate-failed", err)
+				continue
+			}
+			r.Logger.SelfUpdate(service.ComposePath, service.Name, helper, "handed-off", "", nil)
+			result.Updated++
+			continue
 		}
 		if err := r.Commander.Recreate(ctx, service.ComposePath, service.Name, cfg.Force); err != nil {
 			states[i].failed = true

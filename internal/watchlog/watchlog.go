@@ -73,6 +73,21 @@ func (l Logger) ActionResult(action string, compose string, service string, stat
 	l.event("action-result", attrs...)
 }
 
+func (l Logger) SelfUpdate(compose string, service string, helper string, status string, reason string, err error) {
+	attrs := []any{
+		"operation", "self-update",
+		"compose", compose,
+		"service", service,
+		"helper", helper,
+		"status", status,
+	}
+	if reason != "" {
+		attrs = append(attrs, "reason", reason)
+	}
+	attrs = appendError(attrs, err)
+	l.event("action-result", attrs...)
+}
+
 func (l Logger) CleanupResult(compose string, service string, imageID string, status string, reason string, err error) {
 	attrs := []any{
 		"compose", compose,
