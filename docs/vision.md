@@ -23,7 +23,7 @@ It should:
 - update registry-backed `image:` services
 - skip and report local `build:` services
 - run once for manual use or repeatedly on a simple interval
-- use Docker Compose as the action boundary
+- use Docker Compose as the action boundary, with Compose folders mounted into Watchlet at their host path
 - clean up only old image IDs from services it successfully updated
 - update its own selected Watchlet service without a separate self-update setting, handling that recreate last
 - emit clear key-value logs for every meaningful decision and action

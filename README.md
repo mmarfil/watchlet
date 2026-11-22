@@ -41,22 +41,23 @@ services:
       # Required: lets Watchlet call Docker and Docker Compose on the host.
       - /var/run/docker.sock:/var/run/docker.sock
 
-      # Mount each Compose project directory read-only.
-      # Left side: path on your host.
-      # Right side: path inside the Watchlet container.
-      - /Volumes/Docker/Media:/media:ro
-      - /Volumes/Docker/System:/system:ro
+      # Mount each Compose project directory read-only, at the same path
+      # inside Watchlet as on the host (see below for why).
+      - /Volumes/Docker/Media:/Volumes/Docker/Media:ro
+      - /Volumes/Docker/System:/Volumes/Docker/System:ro
       - ./watchlet-state:/state
     environment:
-      # Container-side paths to the Compose files mounted above.
+      # Paths to the Compose files mounted above.
       # Separate multiple Compose files with commas.
-      WATCHLET_COMPOSE: /media/docker-compose.yml,/system/docker-compose.yml
+      WATCHLET_COMPOSE: /Volumes/Docker/Media/docker-compose.yml,/Volumes/Docker/System/docker-compose.yml
       WATCHLET_INTERVAL: 24h
       WATCHLET_RESULT_FILE: /state/last-pass.json
     labels:
       # Optional: lets Watchlet update its own image too.
       - watchlet.enable=true
 ```
+
+Mount every Compose project folder into Watchlet at the same path it has on the host. Docker Compose runs inside Watchlet, so it works out relative bind sources such as `./watchlet-state` and the default project name from the path Watchlet sees, then sends them to Docker on the host; at any other path a recreate can mount the wrong host folders or create the service under a different project name. Other mount layouts are not supported.
 
 The published image includes the `watchlet` binary plus Docker CLI and the Docker Compose plugin, because Watchlet performs updates by calling `docker compose` against the mounted Docker socket.
 
@@ -102,8 +103,8 @@ Durations use Go duration syntax: `24h`, `1h`, `30m`, and so on.
 
 ```sh
 watchlet --once \
-  --compose /media/docker-compose.yml \
-  --compose /system/docker-compose.yml
+  --compose /Volumes/Docker/Media/docker-compose.yml \
+  --compose /Volumes/Docker/System/docker-compose.yml
 ```
 
 ## CLI examples
@@ -111,32 +112,32 @@ watchlet --once \
 Run one update pass and exit:
 
 ```sh
-watchlet --once --compose /media/docker-compose.yml
+watchlet --once --compose /Volumes/Docker/Media/docker-compose.yml
 ```
 
 Run one forced pass. Force mode still respects labels and skips `build:` services, but recreates selected `image:` services after pulling even when the image identity is unchanged:
 
 ```sh
-watchlet --once --force --compose /media/docker-compose.yml
+watchlet --once --force --compose /Volumes/Docker/Media/docker-compose.yml
 ```
 
 Run continuously on the default 24-hour interval:
 
 ```sh
-watchlet --compose /media/docker-compose.yml
+watchlet --compose /Volumes/Docker/Media/docker-compose.yml
 ```
 
 Run continuously with environment configuration:
 
 ```sh
-WATCHLET_COMPOSE=/media/docker-compose.yml,/system/docker-compose.yml \
+WATCHLET_COMPOSE=/Volumes/Docker/Media/docker-compose.yml,/Volumes/Docker/System/docker-compose.yml \
 WATCHLET_INTERVAL=24h \
 watchlet
 ```
 
 ## How Watchlet handles Compose projects
 
-Watchlet passes each configured Compose file to Docker Compose with that file’s directory as the project directory. For example, `/media/docker-compose.yml` runs with `/media` as the Compose project directory. This keeps stack-local `.env` files and Compose interpolation aligned with normal Compose behavior.
+Watchlet passes each configured Compose file to Docker Compose with that file’s directory as the project directory. For example, `/Volumes/Docker/Media/docker-compose.yml` runs with `/Volumes/Docker/Media` as the Compose project directory. This keeps stack-local `.env` files and Compose interpolation aligned with normal Compose behavior.
 
 For image identity checks, Watchlet resolves the effective image reference with Docker Compose config output before running `docker image inspect`. It does not parse `docker compose pull` prose to decide whether an update occurred.
 
@@ -149,9 +150,9 @@ When a result path is configured, Watchlet atomically replaces that JSON file af
 Watchlet emits key-value logs such as:
 
 ```text
-level=INFO msg=watchlet action=service-selected compose=/media/docker-compose.yml service=app image=ghcr.io/example/app:latest
-level=INFO msg=watchlet action=action-result operation=pull compose=/media/docker-compose.yml service=app status=ok
-level=INFO msg=watchlet action=cleanup compose=/media/docker-compose.yml service=app image_id=sha256:old status=ok
+level=INFO msg=watchlet action=service-selected compose=/Volumes/Docker/Media/docker-compose.yml service=app image=ghcr.io/example/app:latest
+level=INFO msg=watchlet action=action-result operation=pull compose=/Volumes/Docker/Media/docker-compose.yml service=app status=ok
+level=INFO msg=watchlet action=cleanup compose=/Volumes/Docker/Media/docker-compose.yml service=app image_id=sha256:old status=ok
 ```
 
 Read logs with your normal container log tooling, for example `docker logs watchlet` or `docker compose logs watchlet`. Command failures include the failing layer, compose path, service when applicable, and Docker/Compose diagnostics when available, including captured stdout/stderr from Docker or Compose.

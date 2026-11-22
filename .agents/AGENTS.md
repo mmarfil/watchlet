@@ -22,6 +22,7 @@ Watchlet is a small, Compose-native updater for selected Docker image services.
 - `watchlet --once --force` recreates selected image services after pulling even when identity is unchanged.
 - A selected Watchlet service updates itself automatically without an environment variable and is handled last in the pass.
 - Watchlet uses Docker Compose as the action boundary and anchors commands with the Compose file’s project directory.
+- Compose folders must be mounted into Watchlet at their host path: Compose runs inside Watchlet and resolves relative bind sources and the default project name from the path Watchlet sees, then sends them to the host daemon. Other mount layouts are not supported.
 - Cleanup is targeted to old image IDs from successfully changed/recreated services; never add broad prune behavior without revising the architecture.
 - Logs are plain key-value lines with compose/service attribution and command diagnostics when available.
 - An optional result file records timestamps, status, and counts for the latest completed pass.

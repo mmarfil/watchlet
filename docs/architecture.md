@@ -75,6 +75,8 @@ For a configured Compose file, Docker Compose commands must run with both:
 
 This keeps explicit absolute paths aligned with normal stack-local `.env` and interpolation behavior when Watchlet runs from its own container working directory.
 
+Compose runs inside Watchlet, so it resolves relative bind sources and the default project name from the path Watchlet sees, then sends them to the host daemon. Compose folders must therefore be mounted into Watchlet at their host path; other mount layouts are not supported.
+
 The command boundary owns:
 
 - `docker compose --project-directory <dir> -f <compose> config --format json`
